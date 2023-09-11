@@ -361,6 +361,7 @@ Else
 }
 
 # Check for basic authentication.
+Write-Output "Script check" >> C:\Windows\Temp\TestLog.txt
 $basicAuthSetting = Get-ChildItem WSMan:\localhost\Service\Auth | Where-Object {$_.Name -eq "Basic"}
 
 If ($DisableBasicAuth)
