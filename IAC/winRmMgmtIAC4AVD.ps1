@@ -1,41 +1,48 @@
-# Here’s a ready-to-use ARM template snippet to run a PowerShell script on a Windows VM at FIRST boot using the Custom Script Extension.
-# That’s usually the cleanest for production VMs:
+# --- Enable WinRM and Configure Firewall ---
 
-{
-  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
-  "contentVersion": "1.0.0.0",
-  "resources": [
-    {
-      "type": "Microsoft.Compute/virtualMachines/extensions",
-      "name": "[concat(parameters('vmName'), '/CustomScriptExtension')]",
-      "apiVersion": "2021-07-01",
-      "location": "[parameters('location')]",
-      "properties": {
-        "publisher": "Microsoft.Compute",
-        "type": "CustomScriptExtension",
-        "typeHandlerVersion": "1.10",
-        "autoUpgradeMinorVersion": true,
-        "settings": {
-          "fileUris": [
-            #"https://<storage-account>.blob.core.windows.net/scripts/init.ps1"
-			"https://raw.githubusercontent.com/<org>/<repo>/<branch>/scripts/init.ps1"
-          ],
-          "commandToExecute": "powershell -ExecutionPolicy Unrestricted -File init.ps1"
-        }
-      },
-      "dependsOn": [
-        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
-      ]
-    }
-  ],
-  "parameters": {
-    "vmName": {
-      "type": "string"
-    },
-    "location": {
-      "type": "string",
-      "defaultValue": "[resourceGroup().location]"
-    }
-  }
-}
+# Enable PowerShell remoting (sets up WinRM service, listeners, and firewall rules by default).
+Enable-PSRemoting -Force
 
+# Add firewall rule to allow WinRM traffic over HTTP (port 5985).
+netsh advfirewall firewall add rule name="WinRM-HTTP" dir=in localport=5985 protocol=TCP action=allow
+
+# Add firewall rule to allow WinRM traffic over HTTPS (port 5986).
+netsh advfirewall firewall add rule name="WinRM-HTTPS" dir=in localport=5986 protocol=TCP action=allow
+
+# (Optional) Remove existing HTTPS listener if one already exists.
+# winrm delete winrm/config/Listener?Address=*+Transport=HTTPS
+
+
+# --- Create Self-Signed SSL Certificate for HTTPS WinRM ---
+
+# Get the current hostname (computer name).
+$myHost = hostname
+
+# Define the domain part for the fully qualified domain name (FQDN).
+$myDomain = "multi.be"
+
+# Combine host and domain to form the FQDN (DNS name).
+$myDNSHost = $myHost + "." + $myDomain
+
+# Generate a new self-signed certificate for the host FQDN and place it in the Local Machine certificate store.
+$cert = New-SelfSignedCertificate -DnsName $myDNSHost -CertStoreLocation Cert:\LocalMachine\My
+
+# Extract the certificate thumbprint for use in WinRM listener configuration.
+$thumbprint = $cert.Thumbprint
+
+# Prepare the listener configuration with hostname and certificate thumbprint.
+$listener = "@{Hostname=""$myDNSHost"";CertificateThumbprint=""$thumbprint""}"
+
+# Create a new WinRM HTTPS listener bound to the FQDN with the certificate.
+winrm create winrm/config/Listener?Address=*+Transport=HTTPS $listener
+
+
+# --- Firewall Rule for HTTPS (Redundant, but ensures port is open) ---
+
+netsh advfirewall firewall add rule name="WinRM-HTTPS" dir=in localport=5986 protocol=TCP action=allow
+
+
+# --- Enable Authentication ---
+
+# Enable Basic authentication (needed for some management tools; consider security implications).
+Set-Item -Path WSMan:\localhost\Service\Auth\Basic -Value $true
