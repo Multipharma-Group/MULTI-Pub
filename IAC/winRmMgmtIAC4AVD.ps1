@@ -1,4 +1,4 @@
-# --- Enable WinRM and Configure Firewall ---
+# --- Enable WinRM and Configure Firewall on Azure Virtual Desktop ---
 
 # Enable PowerShell remoting (sets up WinRM service, listeners, and firewall rules by default).
 Enable-PSRemoting -Force
@@ -44,5 +44,5 @@ netsh advfirewall firewall add rule name="WinRM-HTTPS" dir=in localport=5986 pro
 
 # --- Enable Authentication ---
 
-# Enable Basic authentication (needed for some management tools; consider security implications).
+# Enable Basic authentication
 Set-Item -Path WSMan:\localhost\Service\Auth\Basic -Value $true
