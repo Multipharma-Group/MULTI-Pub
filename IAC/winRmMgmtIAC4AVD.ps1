@@ -1,194 +1,125 @@
 <#
 .SYNOPSIS
-    Configure or remove WinRM over HTTPS with a self-signed certificate.
+  Configure or remove a WinRM HTTPS listener with firewall rules and Basic authentication.
 
 .DESCRIPTION
-    This script enables or removes secure WinRM (Windows Remote Management) 
-    on the local machine. It supports two actions:
-        -Action Install : 
-            * Enables PowerShell remoting
-            * Creates/uses a self-signed certificate for the hostname
-            * Configures a WinRM HTTPS listener on port 5986
-            * Opens firewall rules for WinRM (HTTP/HTTPS)
-            * Enables Basic authentication
-        -Action Remove :
-            * Deletes WinRM HTTPS listeners
-            * Removes WinRM firewall rules
-            * Disables Basic authentication
-            * (Optionally disables PSRemoting if uncommented)
+  This script sets up or removes a WinRM HTTPS listener with a self-signed certificate,
+  configures firewall rules, and enables Basic authentication if requested.
+  It is designed to run once during first boot or provisioning of an Azure Virtual Desktop VM.
 
-.PARAMETER Action
-    Install or Remove (required)
-
-.NOTES
-    Author   : MULTIPHARMA
-    Created  : 2025-08-29
-    Usage    : Run as Administrator
-    Security : Basic authentication should only be used with HTTPS.
-    Log File : C:\Scripts\<ScriptBaseName>.log
-    Markers  : C:\Scripts\WinRM-Toggle.installed / C:\Scripts\WinRM-Toggle.removed
+.AUTHOR
+  MULTIPHARMA
 #>
 
 param(
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory = $true)]
     [ValidateSet("Install","Remove")]
     [string]$Action
 )
 
-# --- Check for elevation ---
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Error "Script must run as Administrator!"
-    exit
-}
-
-# --- Get script name and path ---
-$ScriptFullPath = $PSCommandPath
-$ScriptName = Split-Path -Path $PSCommandPath -Leaf
-$ScriptBaseName = [IO.Path]::GetFileNameWithoutExtension($ScriptName)  # e.g., winRmMgmtIAC4AVD
-$ScriptDir = Split-Path -Path $PSCommandPath -Parent
-
-Write-Host "Running script full path: $ScriptFullPath"
-Write-Host "Script name: $ScriptName"
-Write-Host "Script folder: $ScriptDir"
-
-# --- Setup log file and markers ---
-$logDir = "C:\Scripts"
-$logFile = Join-Path $logDir "$ScriptBaseName.log"  # dynamic log file based on script base name
-
-$installMarker = Join-Path $logDir "WinRM-Toggle.installed"
-$removeMarker  = Join-Path $logDir "WinRM-Toggle.removed"
-
+# --- Setup paths ---
+$ScriptName     = Split-Path -Path $PSCommandPath -Leaf
+$ScriptBaseName = [IO.Path]::GetFileNameWithoutExtension($ScriptName)
+$logDir         = "C:\Scripts"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
+$logFile        = Join-Path $logDir "$ScriptBaseName.log"
+$installMarker  = Join-Path $logDir "WinRM-Toggle.installed"
+$removeMarker   = Join-Path $logDir "WinRM-Toggle.removed"
+
 Start-Transcript -Path $logFile -Append
+Write-Host "===== Running $ScriptName with Action=$Action ====="
 Write-Host "Logging to: $logFile"
 
-# --- Exit if the action has already been run ---
+# --- Safeguard: ensure Action is valid ---
+if (-not $Action) {
+    Write-Error "No -Action parameter supplied (Install or Remove required)"
+    Stop-Transcript
+    exit 1
+}
+
+# --- Prevent rerun if markers exist ---
 if ($Action -eq "Install" -and Test-Path $installMarker) {
     Write-Host "Install action already executed. Exiting."
     Stop-Transcript
-    exit
+    exit 0
 }
 if ($Action -eq "Remove" -and Test-Path $removeMarker) {
     Write-Host "Remove action already executed. Exiting."
     Stop-Transcript
-    exit
+    exit 0
 }
 
-# --- Variables ---
-$myHost   = hostname
-$myDomain = "multi.be"
-$myDNSHost = "$myHost.$myDomain"
+# --- Functions ---
+function Enable-WinRmHttps {
+    Write-Host "Enabling WinRM HTTPS listener..."
 
-Write-Host "=== WinRM HTTPS Toggle Script ==="
-Write-Host "Action selected: $Action"
-Write-Host "Host FQDN: $myDNSHost"
-
-# --- Helper Functions ---
-function Ensure-FirewallRule {
-    param([string]$Name,[int]$Port)
-    if (-not (Get-NetFirewallRule -DisplayName $Name -ErrorAction SilentlyContinue)) {
-        Write-Host "Adding firewall rule: $Name (Port $Port)"
-        netsh advfirewall firewall add rule name="$Name" dir=in localport=$Port protocol=TCP action=allow
-    } else {
-        Write-Host "Firewall rule '$Name' already exists. Skipping..."
-    }
-}
-
-function Remove-FirewallRule {
-    param([string]$Name)
-    $rule = Get-NetFirewallRule -DisplayName $Name -ErrorAction SilentlyContinue
-    if ($rule) {
-        Write-Host "Removing firewall rule: $Name"
-        Remove-NetFirewallRule -DisplayName $Name
-    } else {
-        Write-Host "Firewall rule '$Name' not found. Skipping..."
-    }
-}
-
-# --- Main Logic ---
-if ($Action -eq "Install") {
-    Write-Host "Starting installation of WinRM over HTTPS..."
-
-    Write-Host "Enabling PowerShell remoting..."
+    # Enable WinRM service
     Enable-PSRemoting -Force
 
-    Write-Host "Checking/adding firewall rules..."
-    Ensure-FirewallRule -Name "WinRM-HTTP" -Port 5985
-    Ensure-FirewallRule -Name "WinRM-HTTPS" -Port 5986
+    # Firewall rules
+    netsh advfirewall firewall add rule name="WinRM-HTTP"  dir=in localport=5985 protocol=TCP action=allow | Out-Null
+    netsh advfirewall firewall add rule name="WinRM-HTTPS" dir=in localport=5986 protocol=TCP action=allow | Out-Null
 
-    Write-Host "Checking for existing self-signed certificate..."
-    $cert = Get-ChildItem -Path Cert:\LocalMachine\My |
-            Where-Object { $_.Subject -like "*CN=$myDNSHost" } |
-            Sort-Object NotAfter -Descending |
-            Select-Object -First 1
-    if (-not $cert) {
-        Write-Host "No certificate found. Creating a new self-signed certificate..."
-        $cert = New-SelfSignedCertificate -DnsName $myDNSHost -CertStoreLocation Cert:\LocalMachine\My
-    } else {
-        Write-Host "Found existing certificate: $($cert.Thumbprint)"
-    }
+    # Prepare cert
+    $myHost    = hostname
+    $myDomain  = "multi.be"
+    $myDNSHost = "$myHost.$myDomain"
+
+    Write-Host "Creating self-signed cert for $myDNSHost..."
+    $cert       = New-SelfSignedCertificate -DnsName $myDNSHost -CertStoreLocation Cert:\LocalMachine\My
     $thumbprint = $cert.Thumbprint
 
-    Write-Host "Configuring WinRM HTTPS listener..."
-    $existingListeners = winrm enumerate winrm/config/Listener | Where-Object { $_ -match "Transport = HTTPS" }
-    if ($existingListeners) {
-        Write-Host "Removing existing HTTPS listener(s)..."
-        winrm delete winrm/config/Listener?Address=*+Transport=HTTPS
-    } else {
-        Write-Host "No HTTPS listener found. Skipping deletion..."
+    # Clean existing HTTPS listener
+    try {
+        Write-Host "Removing existing HTTPS listener if any..."
+        winrm delete winrm/config/Listener?Address=*+Transport=HTTPS | Out-Null
+    } catch {
+        Write-Host "No existing HTTPS listener found, continuing..."
     }
 
-    $listenerSettings = "@{Hostname=`"$myDNSHost`";CertificateThumbprint=`"$thumbprint`"}"
-    winrm create winrm/config/Listener?Address=*+Transport=HTTPS $listenerSettings
-    Write-Host "WinRM HTTPS listener created."
+    # Create HTTPS listener
+    $listener = "@{Hostname=`"$myDNSHost`";CertificateThumbprint=`"$thumbprint`"}"
+    Write-Host "Creating new HTTPS listener..."
+    winrm create winrm/config/Listener?Address=*+Transport=HTTPS $listener | Out-Null
 
-    # --- Correct Basic authentication logic ---
+    # Enable Basic authentication
     Write-Host "Enabling Basic authentication..."
-    $authPath = "WSMan:\localhost\Service\Auth"
-    Set-Item -Path "$authPath\Basic" -Value $true
+    Set-Item -Path WSMan:\localhost\Service\Auth\Basic -Value $true
     Restart-Service WinRM -Force
-    $currentValue = (Get-Item "$authPath\Basic").Value
-    Write-Host "Basic authentication is now set to: $currentValue"
+    $current = (Get-Item WSMan:\localhost\Service\Auth\Basic).Value
+    Write-Host "Basic authentication is now set to: $current"
 
-    # Create install marker
     New-Item -ItemType File -Path $installMarker -Force | Out-Null
-    Write-Host "Install marker created at $installMarker. Install will not run again."
-
-    Write-Host "=== Installation complete ==="
+    Write-Host "Install marker created: $installMarker"
 }
 
-elseif ($Action -eq "Remove") {
-    Write-Host "Starting removal of WinRM HTTPS configuration..."
+function Disable-WinRmHttps {
+    Write-Host "Removing WinRM HTTPS listener..."
 
-    Write-Host "Checking for existing HTTPS listeners..."
-    $httpsListeners = winrm enumerate winrm/config/Listener | Where-Object { $_ -match "Transport = HTTPS" }
-    if ($httpsListeners) {
-        Write-Host "Removing listener(s)..."
-        winrm delete winrm/config/Listener?Address=*+Transport=HTTPS
-    } else {
-        Write-Host "No listener found. Skipping..."
+    try {
+        winrm delete winrm/config/Listener?Address=*+Transport=HTTPS | Out-Null
+    } catch {
+        Write-Host "No HTTPS listener found to remove."
     }
 
-    Write-Host "Removing firewall rules..."
-    Remove-FirewallRule -Name "WinRM-HTTP"
-    Remove-FirewallRule -Name "WinRM-HTTPS"
-
-    # --- Disable Basic authentication ---
+    # Disable Basic authentication
     Write-Host "Disabling Basic authentication..."
-    $authPath = "WSMan:\localhost\Service\Auth"
-    Set-Item -Path "$authPath\Basic" -Value $false
+    Set-Item -Path WSMan:\localhost\Service\Auth\Basic -Value $false
     Restart-Service WinRM -Force
-    $currentValue = (Get-Item "$authPath\Basic").Value
-    Write-Host "Basic authentication is now set to: $currentValue"
+    $current = (Get-Item WSMan:\localhost\Service\Auth\Basic).Value
+    Write-Host "Basic authentication is now set to: $current"
 
-    # Create remove marker
     New-Item -ItemType File -Path $removeMarker -Force | Out-Null
-    Write-Host "Remove marker created at $removeMarker. Remove will not run again."
-
-    Write-Host "=== Removal complete ==="
+    Write-Host "Remove marker created: $removeMarker"
 }
 
-# --- Stop logging ---
+# --- Main execution ---
+if ($Action -eq "Install") {
+    Enable-WinRmHttps
+}
+elseif ($Action -eq "Remove") {
+    Disable-WinRmHttps
+}
+
 Stop-Transcript
-Write-Host "All actions logged to $logFile"
