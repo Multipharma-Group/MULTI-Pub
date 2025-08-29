@@ -30,7 +30,7 @@
 
 .NOTES
     Author   : MULTIPHARMA
-    Created  : 2025-08-28
+    Created  : 2025-08-29
     Usage    : Run as Administrator
     Security : Basic authentication should only be used with HTTPS.
                For production, consider using a trusted certificate instead
@@ -43,10 +43,16 @@ param(
     [string]$Action
 )
 
+# --- Setup Variables ---
 $myHost   = hostname
 $myDomain = "multi.be"
 $myDNSHost = "$myHost.$myDomain"
 
+Write-Host "=== WinRM HTTPS Toggle Script ==="
+Write-Host "Action selected: $Action"
+Write-Host "Host FQDN: $myDNSHost"
+
+# --- Helper Functions ---
 function Ensure-FirewallRule {
     param([string]$Name,[int]$Port)
     if (-not (Get-NetFirewallRule -DisplayName $Name -ErrorAction SilentlyContinue)) {
@@ -68,47 +74,46 @@ function Remove-FirewallRule {
     }
 }
 
+# --- Main Logic ---
 if ($Action -eq "Install") {
-    Write-Host "=== Installing WinRM HTTPS configuration ==="
+    Write-Host "Starting installation of WinRM over HTTPS..."
 
-    # Enable PS Remoting
+    Write-Host "Enabling PowerShell remoting..."
     Enable-PSRemoting -Force
 
-    # Ensure firewall rules
+    Write-Host "Checking/adding firewall rules..."
     Ensure-FirewallRule -Name "WinRM-HTTP" -Port 5985
     Ensure-FirewallRule -Name "WinRM-HTTPS" -Port 5986
 
-    # Check for existing cert
+    Write-Host "Checking for existing self-signed certificate..."
     $cert = Get-ChildItem -Path Cert:\LocalMachine\My |
             Where-Object { $_.Subject -like "*CN=$myDNSHost" } |
             Sort-Object NotAfter -Descending |
             Select-Object -First 1
-
     if (-not $cert) {
-        Write-Host "Creating self-signed certificate for $myDNSHost..."
+        Write-Host "No certificate found. Creating a new self-signed certificate..."
         $cert = New-SelfSignedCertificate -DnsName $myDNSHost -CertStoreLocation Cert:\LocalMachine\My
     } else {
-        Write-Host "Using existing certificate $($cert.Thumbprint) for $myDNSHost."
+        Write-Host "Found existing certificate: $($cert.Thumbprint)"
     }
-
     $thumbprint = $cert.Thumbprint
 
-    # Configure HTTPS listener
+    Write-Host "Configuring WinRM HTTPS listener..."
     $listener = winrm enumerate winrm/config/Listener | Where-Object { $_ -match "Transport = HTTPS" -and $_ -match $thumbprint }
     if (-not $listener) {
-        Write-Host "Configuring WinRM HTTPS listener..."
+        Write-Host "Listener does not exist. Creating..."
         winrm delete winrm/config/Listener?Address=*+Transport=HTTPS 2>$null
         $listenerSettings = "@{Hostname=`"$myDNSHost`";CertificateThumbprint=`"$thumbprint`"}"
         winrm create winrm/config/Listener?Address=*+Transport=HTTPS $listenerSettings
     } else {
-        Write-Host "WinRM HTTPS listener already configured. Skipping..."
+        Write-Host "Listener already configured. Skipping..."
     }
 
-    # Enable Basic Auth
+    Write-Host "Enabling Basic authentication..."
     $basicAuth = Get-Item WSMan:\localhost\Service\Auth\Basic
     if (-not $basicAuth.Value) {
-        Write-Host "Enabling Basic authentication..."
         Set-Item WSMan:\localhost\Service\Auth\Basic -Value $true
+        Write-Host "Basic authentication enabled."
     } else {
         Write-Host "Basic authentication already enabled. Skipping..."
     }
@@ -117,31 +122,32 @@ if ($Action -eq "Install") {
 }
 
 elseif ($Action -eq "Remove") {
-    Write-Host "=== Removing WinRM HTTPS configuration ==="
+    Write-Host "Starting removal of WinRM HTTPS configuration..."
 
-    # Remove listener
+    Write-Host "Checking for existing HTTPS listeners..."
     $httpsListeners = winrm enumerate winrm/config/Listener | Where-Object { $_ -match "Transport = HTTPS" }
     if ($httpsListeners) {
-        Write-Host "Removing WinRM HTTPS listener(s)..."
+        Write-Host "Removing listener(s)..."
         winrm delete winrm/config/Listener?Address=*+Transport=HTTPS
     } else {
-        Write-Host "No WinRM HTTPS listener found. Skipping..."
+        Write-Host "No listener found. Skipping..."
     }
 
-    # Remove firewall rules
+    Write-Host "Removing firewall rules..."
     Remove-FirewallRule -Name "WinRM-HTTP"
     Remove-FirewallRule -Name "WinRM-HTTPS"
 
-    # Disable Basic Auth
+    Write-Host "Disabling Basic authentication..."
     $basicAuth = Get-Item WSMan:\localhost\Service\Auth\Basic
     if ($basicAuth.Value) {
-        Write-Host "Disabling Basic authentication..."
         Set-Item WSMan:\localhost\Service\Auth\Basic -Value $false
+        Write-Host "Basic authentication disabled."
     } else {
-        Write-Host "Basic authentication already disabled. Skipping..."
+        Write-Host "Already disabled. Skipping..."
     }
 
-    # (Optional) disable PSRemoting fully
+    # Optional: disable PSRemoting completely
+    # Write-Host "Disabling PowerShell remoting..."
     # Disable-PSRemoting -Force
 
     Write-Host "=== Removal complete ==="
