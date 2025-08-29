@@ -107,15 +107,19 @@ if ($Action -eq "Install") {
     $thumbprint = $cert.Thumbprint
 
     Write-Host "Configuring WinRM HTTPS listener..."
-    $listener = winrm enumerate winrm/config/Listener | Where-Object { $_ -match "Transport = HTTPS" -and $_ -match $thumbprint }
-    if (-not $listener) {
-        Write-Host "Listener does not exist. Creating..."
-        winrm delete winrm/config/Listener?Address=*+Transport=HTTPS 2>$null
-        $listenerSettings = "@{Hostname=`"$myDNSHost`";CertificateThumbprint=`"$thumbprint`"}"
-        winrm create winrm/config/Listener?Address=*+Transport=HTTPS $listenerSettings
+    # Check for existing HTTPS listener before attempting deletion
+    $existingListeners = winrm enumerate winrm/config/Listener | Where-Object { $_ -match "Transport = HTTPS" }
+    if ($existingListeners) {
+        Write-Host "Removing existing HTTPS listener(s)..."
+        winrm delete winrm/config/Listener?Address=*+Transport=HTTPS
     } else {
-        Write-Host "Listener already configured. Skipping..."
+        Write-Host "No HTTPS listener found. Skipping deletion..."
     }
+
+    # Create the new listener
+    $listenerSettings = "@{Hostname=`"$myDNSHost`";CertificateThumbprint=`"$thumbprint`"}"
+    winrm create winrm/config/Listener?Address=*+Transport=HTTPS $listenerSettings
+    Write-Host "WinRM HTTPS listener created."
 
     Write-Host "Enabling Basic authentication..."
     $basicAuth = Get-Item WSMan:\localhost\Service\Auth\Basic
