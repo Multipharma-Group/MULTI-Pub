@@ -35,6 +35,7 @@
     Security : Basic authentication should only be used with HTTPS.
                For production, consider using a trusted certificate instead
                of a self-signed one.
+    Log File : C:\Scripts\winRmMgmtIAC4AVD.log
 #>
 
 param(
@@ -42,6 +43,13 @@ param(
     [ValidateSet("Install","Remove")]
     [string]$Action
 )
+
+# --- Setup log file ---
+$logDir = "C:\Scripts"
+$logFile = Join-Path $logDir "winRmMgmtIAC4AVD.log"
+if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+
+Start-Transcript -Path $logFile -Append
 
 # --- Setup Variables ---
 $myHost   = hostname
@@ -152,3 +160,6 @@ elseif ($Action -eq "Remove") {
 
     Write-Host "=== Removal complete ==="
 }
+
+# --- Stop logging ---
+Stop-Transcript
