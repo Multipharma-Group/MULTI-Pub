@@ -13,8 +13,6 @@
   Install : Configure WinRM HTTPS listener (default).
   Remove  : Remove WinRM HTTPS listener and disable Basic auth.
 
-.AUTHOR
-  MULTIPHARMA
 #>
 
 param (
