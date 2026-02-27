@@ -217,8 +217,12 @@ Function Enable-GlobalHttpFirewallAccess
 }
 
 # Setup error handling.
-Trap { Write-Output $_ }
-$ErrorActionPreference = "Continue"
+Trap
+{
+    $_
+    Exit 1
+}
+$ErrorActionPreference = "Stop"
 
 # Get the ID and security principal of the current user account
 $myWindowsID=[System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -304,54 +308,56 @@ if ($token_value -ne 1) {
     New-ItemProperty -Path $token_path -Name $token_prop_name -Value 1 -PropertyType DWORD > $null
 }
 
-# SSL Listener (idempotent, safe for GCP)
+# Make sure there is a SSL listener.
 $listeners = Get-ChildItem WSMan:\localhost\Listener
-$httpsListener = $listeners | Where-Object {$_.Keys -like "TRANSPORT=HTTPS"}
+If (!($listeners | Where-Object {$_.Keys -like "TRANSPORT=HTTPS"}))
+{
+    # We cannot use New-SelfSignedCertificate on 2012R2 and earlier
+    $thumbprint = New-LegacySelfSignedCert -SubjectName $SubjectName -ValidDays $CertValidityDays
+    Write-HostLog "Self-signed SSL certificate generated; thumbprint: $thumbprint"
 
-# Try to find a valid existing certificate
-$existingCert = Get-ChildItem Cert:\LocalMachine\My |
-    Where-Object { $_.Subject -like "*CN=$SubjectName*" } |
-    Sort-Object NotAfter -Descending |
-    Select-Object -First 1
-
-$useCertThumbprint = $null
-
-# Check if existing listener is already using a valid cert
-if ($existingCert -and $httpsListener) {
-    $listenerCertThumb = $httpsListener.CertificateThumbprint
-    if ($listenerCertThumb -eq $existingCert.Thumbprint) {
-        $useCertThumbprint = $existingCert.Thumbprint
-        Write-HostLog "Existing certificate is already bound to HTTPS listener; thumbprint: $useCertThumbprint"
+    # Create the hashtables of settings to be used.
+    $valueset = @{
+        Hostname = $SubjectName
+        CertificateThumbprint = $thumbprint
     }
+
+    $selectorset = @{
+        Transport = "HTTPS"
+        Address = "*"
+    }
+
+    Write-Verbose "Enabling SSL listener."
+    New-WSManInstance -ResourceURI 'winrm/config/Listener' -SelectorSet $selectorset -ValueSet $valueset
+    Write-Log "Enabled SSL listener."
 }
+Else
+{
+    Write-Verbose "SSL listener is already active."
 
-# If no valid certificate is bound, create or reuse one
-if (-not $useCertThumbprint) {
+    # Force a new SSL cert on Listener if the $ForceNewSSLCert
+    If ($ForceNewSSLCert)
+    {
 
-    # Generate a new cert if needed
-    if (-not $existingCert -or $ForceNewSSLCert) {
-        $newThumbprint = New-LegacySelfSignedCert -SubjectName $SubjectName -ValidDays $CertValidityDays
-        Write-HostLog "New self-signed certificate generated; thumbprint: $newThumbprint"
+        # We cannot use New-SelfSignedCertificate on 2012R2 and earlier
+        $thumbprint = New-LegacySelfSignedCert -SubjectName $SubjectName -ValidDays $CertValidityDays
+        Write-HostLog "Self-signed SSL certificate generated; thumbprint: $thumbprint"
 
-        # Retrieve the certificate object from store
-        $existingCert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Thumbprint -eq $newThumbprint }
+        $valueset = @{
+            CertificateThumbprint = $thumbprint
+            Hostname = $SubjectName
+        }
+
+        # Delete the listener for SSL
+        $selectorset = @{
+            Address = "*"
+            Transport = "HTTPS"
+        }
+        Remove-WSManInstance -ResourceURI 'winrm/config/Listener' -SelectorSet $selectorset
+
+        # Add new Listener with new SSL cert
+        New-WSManInstance -ResourceURI 'winrm/config/Listener' -SelectorSet $selectorset -ValueSet $valueset
     }
-
-    $useCertThumbprint = $existingCert.Thumbprint
-
-    # Remove old HTTPS listener if present
-    if ($httpsListener) {
-        Remove-WSManInstance -ResourceURI 'winrm/config/Listener' -SelectorSet @{Address='*';Transport='HTTPS'}
-    }
-
-    # Create HTTPS listener bound to certificate
-    New-WSManInstance -ResourceURI 'winrm/config/Listener' `
-        -SelectorSet @{Address='*'; Transport='HTTPS'} `
-        -ValueSet @{Hostname=$SubjectName; CertificateThumbprint=$useCertThumbprint}
-
-    Write-HostLog "HTTPS listener created and bound to certificate; thumbprint: $useCertThumbprint"
-} else {
-    Write-HostLog "HTTPS listener already correctly configured with certificate."
 }
 
 # Check for basic authentication.
@@ -445,24 +451,3 @@ Else
     Throw "Unable to establish an HTTP or HTTPS remoting session."
 }
 Write-VerboseLog "PS Remoting has been successfully configured for Ansible."
-
-# Ensure RDP (Remote Desktop) service is running
-$rdpService = Get-Service -Name TermService -ErrorAction SilentlyContinue
-if ($rdpService.Status -ne "Running") {
-    Set-Service -Name TermService -StartupType Automatic
-    Start-Service -Name TermService
-    Write-HostLog "RDP service started and set to Automatic."
-} else { Write-Verbose "RDP service is already running." }
-
-# Ensure firewall allows RDP (TCP 3389)
-$rdpRuleCheck = netsh advfirewall firewall show rule name="Allow RDP"
-if ($rdpRuleCheck.Count -lt 5) {
-    netsh advfirewall firewall add rule name="Allow RDP" protocol=TCP dir=in localport=3389 action=allow profile=any
-    Write-HostLog "Firewall rule added to allow RDP (TCP 3389)."
-} else { Write-Verbose "Firewall rule already exists to allow RDP." }
-
-# Ensure Google Guest Agent is healthy
-Set-Service -Name GCEAgent -StartupType Automatic -ErrorAction SilentlyContinue
-Start-Service -Name GCEAgent -ErrorAction SilentlyContinue
-
-Exit 0
