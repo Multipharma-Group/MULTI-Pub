@@ -217,8 +217,12 @@ Function Enable-GlobalHttpFirewallAccess
 }
 
 # Setup error handling.
-Trap { Write-Output $_ }
-$ErrorActionPreference = "Continue"
+Trap
+{
+    $_
+    Exit 1
+}
+$ErrorActionPreference = "Stop"
 
 # Get the ID and security principal of the current user account
 $myWindowsID=[System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -308,16 +312,9 @@ if ($token_value -ne 1) {
 $listeners = Get-ChildItem WSMan:\localhost\Listener
 If (!($listeners | Where-Object {$_.Keys -like "TRANSPORT=HTTPS"}))
 {
-    # Check if a self-signed certificate already exists for this hostname
-    $existingCert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Subject -like "*CN=$SubjectName*" } | Sort-Object NotAfter -Descending | Select-Object -First 1
-
-    if ($existingCert) {
-        $thumbprint = $existingCert.Thumbprint
-        Write-HostLog "Existing self-signed certificate found; thumbprint: $thumbprint"
-    } else {
-        $thumbprint = New-LegacySelfSignedCert -SubjectName $SubjectName -ValidDays $CertValidityDays
-        Write-HostLog "New self-signed certificate generated; thumbprint: $thumbprint"
-    }
+    # We cannot use New-SelfSignedCertificate on 2012R2 and earlier
+    $thumbprint = New-LegacySelfSignedCert -SubjectName $SubjectName -ValidDays $CertValidityDays
+    Write-HostLog "Self-signed SSL certificate generated; thumbprint: $thumbprint"
 
     # Create the hashtables of settings to be used.
     $valueset = @{
@@ -454,12 +451,3 @@ Else
     Throw "Unable to establish an HTTP or HTTPS remoting session."
 }
 Write-VerboseLog "PS Remoting has been successfully configured for Ansible."
-
-# Ensure Google Guest Agent is healthy
-# Guarantees the script exits successfully
-# Guarantees agent remains enabled
-# Prevents bad recovery state
-Set-Service -Name GCEAgent -StartupType Automatic -ErrorAction SilentlyContinue
-Start-Service -Name GCEAgent -ErrorAction SilentlyContinue
-
-Exit 0
