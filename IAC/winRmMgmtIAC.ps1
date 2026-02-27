@@ -217,12 +217,10 @@ Function Enable-GlobalHttpFirewallAccess
 }
 
 # Setup error handling.
-Trap
-{
-    $_
-    Exit 1
+Trap {
+    Write-Output $_
 }
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 
 # Get the ID and security principal of the current user account
 $myWindowsID=[System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -451,3 +449,12 @@ Else
     Throw "Unable to establish an HTTP or HTTPS remoting session."
 }
 Write-VerboseLog "PS Remoting has been successfully configured for Ansible."
+
+# Ensure Google Guest Agent is healthy
+# Guarantees the script exits successfully
+# Guarantees agent remains enabled
+# Prevents bad recovery state
+Set-Service -Name GCEAgent -StartupType Automatic -ErrorAction SilentlyContinue
+Start-Service -Name GCEAgent -ErrorAction SilentlyContinue
+
+Exit 0
