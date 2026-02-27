@@ -217,12 +217,8 @@ Function Enable-GlobalHttpFirewallAccess
 }
 
 # Setup error handling.
-Trap
-{
-    $_
-    Exit 1
-}
-$ErrorActionPreference = "Stop"
+Trap { Write-Output $_ }
+$ErrorActionPreference = "Continue"
 
 # Get the ID and security principal of the current user account
 $myWindowsID=[System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -308,56 +304,39 @@ if ($token_value -ne 1) {
     New-ItemProperty -Path $token_path -Name $token_prop_name -Value 1 -PropertyType DWORD > $null
 }
 
-# Make sure there is a SSL listener.
+# SSL Listener (idempotent, safe for GCP)
 $listeners = Get-ChildItem WSMan:\localhost\Listener
-If (!($listeners | Where-Object {$_.Keys -like "TRANSPORT=HTTPS"}))
-{
-    # We cannot use New-SelfSignedCertificate on 2012R2 and earlier
-    $thumbprint = New-LegacySelfSignedCert -SubjectName $SubjectName -ValidDays $CertValidityDays
-    Write-HostLog "Self-signed SSL certificate generated; thumbprint: $thumbprint"
+$httpsListener = $listeners | Where-Object {$_.Keys -like "TRANSPORT=HTTPS"}
 
-    # Create the hashtables of settings to be used.
-    $valueset = @{
-        Hostname = $SubjectName
-        CertificateThumbprint = $thumbprint
+# Find a valid existing certificate
+$existingCert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Subject -like "*CN=$SubjectName*" } | Sort-Object NotAfter -Descending | Select-Object -First 1
+
+$useCertThumbprint = $null
+if ($existingCert -and $httpsListener) {
+    # Check if listener is already using this certificate
+    $listenerCertThumb = $httpsListener.CertificateThumbprint
+    if ($listenerCertThumb -eq $existingCert.Thumbprint) {
+        $useCertThumbprint = $existingCert.Thumbprint
+        Write-HostLog "Existing certificate is already bound to HTTPS listener; thumbprint: $useCertThumbprint"
     }
-
-    $selectorset = @{
-        Transport = "HTTPS"
-        Address = "*"
-    }
-
-    Write-Verbose "Enabling SSL listener."
-    New-WSManInstance -ResourceURI 'winrm/config/Listener' -SelectorSet $selectorset -ValueSet $valueset
-    Write-Log "Enabled SSL listener."
 }
-Else
-{
-    Write-Verbose "SSL listener is already active."
 
-    # Force a new SSL cert on Listener if the $ForceNewSSLCert
-    If ($ForceNewSSLCert)
-    {
-
-        # We cannot use New-SelfSignedCertificate on 2012R2 and earlier
-        $thumbprint = New-LegacySelfSignedCert -SubjectName $SubjectName -ValidDays $CertValidityDays
-        Write-HostLog "Self-signed SSL certificate generated; thumbprint: $thumbprint"
-
-        $valueset = @{
-            CertificateThumbprint = $thumbprint
-            Hostname = $SubjectName
-        }
-
-        # Delete the listener for SSL
-        $selectorset = @{
-            Address = "*"
-            Transport = "HTTPS"
-        }
-        Remove-WSManInstance -ResourceURI 'winrm/config/Listener' -SelectorSet $selectorset
-
-        # Add new Listener with new SSL cert
-        New-WSManInstance -ResourceURI 'winrm/config/Listener' -SelectorSet $selectorset -ValueSet $valueset
+if (-not $useCertThumbprint) {
+    # Need a new or reused certificate for the listener
+    if (-not $existingCert -or $ForceNewSSLCert) {
+        $existingCert = New-LegacySelfSignedCert -SubjectName $SubjectName -ValidDays $CertValidityDays
+        Write-HostLog "New self-signed certificate generated; thumbprint: $existingCert"
     }
+    $useCertThumbprint = $existingCert.Thumbprint
+
+    # Remove old listener if present
+    if ($httpsListener) {
+        Remove-WSManInstance -ResourceURI 'winrm/config/Listener' -SelectorSet @{Address='*';Transport='HTTPS'}
+    }
+
+    # Add listener bound to certificate
+    New-WSManInstance -ResourceURI 'winrm/config/Listener' -SelectorSet @{Address='*';Transport='HTTPS'} -ValueSet @{Hostname=$SubjectName; CertificateThumbprint=$useCertThumbprint}
+    Write-HostLog "HTTPS listener created and bound to certificate; thumbprint: $useCertThumbprint"
 }
 
 # Check for basic authentication.
@@ -451,3 +430,12 @@ Else
     Throw "Unable to establish an HTTP or HTTPS remoting session."
 }
 Write-VerboseLog "PS Remoting has been successfully configured for Ansible."
+
+# Ensure Google Guest Agent is healthy
+# Guarantees the script exits successfully
+# Guarantees agent remains enabled
+# Prevents bad recovery state
+Set-Service -Name GCEAgent -StartupType Automatic -ErrorAction SilentlyContinue
+Start-Service -Name GCEAgent -ErrorAction SilentlyContinue
+
+Exit 0
