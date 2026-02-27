@@ -308,12 +308,16 @@ if ($token_value -ne 1) {
 $listeners = Get-ChildItem WSMan:\localhost\Listener
 $httpsListener = $listeners | Where-Object {$_.Keys -like "TRANSPORT=HTTPS"}
 
-# Find a valid existing certificate
-$existingCert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Subject -like "*CN=$SubjectName*" } | Sort-Object NotAfter -Descending | Select-Object -First 1
+# Try to find a valid existing certificate
+$existingCert = Get-ChildItem Cert:\LocalMachine\My |
+    Where-Object { $_.Subject -like "*CN=$SubjectName*" } |
+    Sort-Object NotAfter -Descending |
+    Select-Object -First 1
 
 $useCertThumbprint = $null
+
+# Check if existing listener is already using a valid cert
 if ($existingCert -and $httpsListener) {
-    # Check if listener is already using this certificate
     $listenerCertThumb = $httpsListener.CertificateThumbprint
     if ($listenerCertThumb -eq $existingCert.Thumbprint) {
         $useCertThumbprint = $existingCert.Thumbprint
@@ -321,22 +325,33 @@ if ($existingCert -and $httpsListener) {
     }
 }
 
+# If no valid certificate is bound, create or reuse one
 if (-not $useCertThumbprint) {
-    # Need a new or reused certificate for the listener
+
+    # Generate a new cert if needed
     if (-not $existingCert -or $ForceNewSSLCert) {
-        $existingCert = New-LegacySelfSignedCert -SubjectName $SubjectName -ValidDays $CertValidityDays
-        Write-HostLog "New self-signed certificate generated; thumbprint: $existingCert"
+        $newThumbprint = New-LegacySelfSignedCert -SubjectName $SubjectName -ValidDays $CertValidityDays
+        Write-HostLog "New self-signed certificate generated; thumbprint: $newThumbprint"
+
+        # Retrieve the certificate object from store
+        $existingCert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Thumbprint -eq $newThumbprint }
     }
+
     $useCertThumbprint = $existingCert.Thumbprint
 
-    # Remove old listener if present
+    # Remove old HTTPS listener if present
     if ($httpsListener) {
         Remove-WSManInstance -ResourceURI 'winrm/config/Listener' -SelectorSet @{Address='*';Transport='HTTPS'}
     }
 
-    # Add listener bound to certificate
-    New-WSManInstance -ResourceURI 'winrm/config/Listener' -SelectorSet @{Address='*';Transport='HTTPS'} -ValueSet @{Hostname=$SubjectName; CertificateThumbprint=$useCertThumbprint}
+    # Create HTTPS listener bound to certificate
+    New-WSManInstance -ResourceURI 'winrm/config/Listener' `
+        -SelectorSet @{Address='*'; Transport='HTTPS'} `
+        -ValueSet @{Hostname=$SubjectName; CertificateThumbprint=$useCertThumbprint}
+
     Write-HostLog "HTTPS listener created and bound to certificate; thumbprint: $useCertThumbprint"
+} else {
+    Write-HostLog "HTTPS listener already correctly configured with certificate."
 }
 
 # Check for basic authentication.
@@ -431,10 +446,22 @@ Else
 }
 Write-VerboseLog "PS Remoting has been successfully configured for Ansible."
 
+# Ensure RDP (Remote Desktop) service is running
+$rdpService = Get-Service -Name TermService -ErrorAction SilentlyContinue
+if ($rdpService.Status -ne "Running") {
+    Set-Service -Name TermService -StartupType Automatic
+    Start-Service -Name TermService
+    Write-HostLog "RDP service started and set to Automatic."
+} else { Write-Verbose "RDP service is already running." }
+
+# Ensure firewall allows RDP (TCP 3389)
+$rdpRuleCheck = netsh advfirewall firewall show rule name="Allow RDP"
+if ($rdpRuleCheck.Count -lt 5) {
+    netsh advfirewall firewall add rule name="Allow RDP" protocol=TCP dir=in localport=3389 action=allow profile=any
+    Write-HostLog "Firewall rule added to allow RDP (TCP 3389)."
+} else { Write-Verbose "Firewall rule already exists to allow RDP." }
+
 # Ensure Google Guest Agent is healthy
-# Guarantees the script exits successfully
-# Guarantees agent remains enabled
-# Prevents bad recovery state
 Set-Service -Name GCEAgent -StartupType Automatic -ErrorAction SilentlyContinue
 Start-Service -Name GCEAgent -ErrorAction SilentlyContinue
 
