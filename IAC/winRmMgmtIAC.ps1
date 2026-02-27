@@ -217,9 +217,7 @@ Function Enable-GlobalHttpFirewallAccess
 }
 
 # Setup error handling.
-Trap {
-    Write-Output $_
-}
+Trap { Write-Output $_ }
 $ErrorActionPreference = "Continue"
 
 # Get the ID and security principal of the current user account
@@ -310,9 +308,16 @@ if ($token_value -ne 1) {
 $listeners = Get-ChildItem WSMan:\localhost\Listener
 If (!($listeners | Where-Object {$_.Keys -like "TRANSPORT=HTTPS"}))
 {
-    # We cannot use New-SelfSignedCertificate on 2012R2 and earlier
-    $thumbprint = New-LegacySelfSignedCert -SubjectName $SubjectName -ValidDays $CertValidityDays
-    Write-HostLog "Self-signed SSL certificate generated; thumbprint: $thumbprint"
+    # Check if a self-signed certificate already exists for this hostname
+    $existingCert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Subject -like "*CN=$SubjectName*" } | Sort-Object NotAfter -Descending | Select-Object -First 1
+
+    if ($existingCert) {
+        $thumbprint = $existingCert.Thumbprint
+        Write-HostLog "Existing self-signed certificate found; thumbprint: $thumbprint"
+    } else {
+        $thumbprint = New-LegacySelfSignedCert -SubjectName $SubjectName -ValidDays $CertValidityDays
+        Write-HostLog "New self-signed certificate generated; thumbprint: $thumbprint"
+    }
 
     # Create the hashtables of settings to be used.
     $valueset = @{
