@@ -452,6 +452,13 @@ Else
 }
 Write-VerboseLog "PS Remoting has been successfully configured for Ansible."
 
+# Configure firewall to allow RDP connection.
+netsh advfirewall firewall add rule name="Allow RDP" protocol=TCP dir=in localport=3389 action=allow profile=any
+
+# RDP Service
+Set-Service -Name TermService -StartupType Automatic
+Start-Service -Name TermService
+
 # Google Guest Agent
 Set-Service -Name GCEAgent -StartupType Automatic
 Start-Service -Name GCEAgent
