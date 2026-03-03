@@ -459,7 +459,30 @@ netsh advfirewall firewall add rule name="Allow RDP" protocol=TCP dir=in localpo
 Set-Service -Name TermService -StartupType Automatic
 Start-Service -Name TermService
 
-# Google Guest Agent
-Set-Service -Name GCEAgent -StartupType Automatic
-Start-Service -Name GCEAgent
+# Detect GCP environment
+Function Test-IsGCP {
+    try {
+        $response = Invoke-WebRequest -Uri "http://metadata.google.internal/computeMetadata/v1/instance/id" `
+                                      -Headers @{ "Metadata-Flavor" = "Google" } `
+                                      -TimeoutSec 2 -ErrorAction Stop
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# Only enable Google Guest Agent if running on GCP
+If (Test-IsGCP) {
+    Write-Verbose "GCP detected, enabling Google Guest Agent service."
+    Try {
+        Set-Service -Name GCEAgent -StartupType Automatic -ErrorAction Stop
+        Start-Service -Name GCEAgent -ErrorAction Stop
+        Write-Verbose "Google Guest Agent service started."
+    } Catch {
+        Write-Log "Failed to start Google Guest Agent: $_"
+    }
+} Else {
+    Write-Verbose "Not a GCP VM, skipping Google Guest Agent configuration."
+}
+
 Exit 0
